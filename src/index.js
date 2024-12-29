@@ -4,8 +4,13 @@ const os = require('os');
 const path = require('path');
 const cp = require('child_process');
 
+const { defaultFormats } = require('jimp');
+const { createJimp } = require('@jimp/core');
+const jimpResize = require('@jimp/plugin-resize');
+const jimpContain = require('@jimp/plugin-contain');
+const jimpCover = require('@jimp/plugin-cover');
+
 const glob = require('glob');
-const jimp = require('jimp');
 const plist = require('plist');
 const icns = require('icns-lib');
 const { program } = require('commander');
@@ -14,16 +19,27 @@ const { default: fetch } = require('cross-fetch');
 const jpeg = require('./openjpeg');
 const { version } = require('../package.json');
 
-jimp.decoders['image/jp2'] = (buffer) => {
-  const { width, height, data } = jpeg(buffer, 'jp2');
+const jp2Format = () => {
+  return {
+    mime: 'image/jp2',
+    decode: (buffer) => {
+      const { width, height, data } = jpeg(buffer, 'jp2');
 
-  // Convert Planar RGB into Pixel RGB
-  const rgbaBuffer = Buffer.alloc(data.length);
-  for (let i = 0; i < data.length; i++) {
-    rgbaBuffer[i] = data[(data.length / 4) * (i % 4) + Math.round(i / 4)] || 0;
+      // Convert Planar RGB into Pixel RGB
+      const rgbaBuffer = Buffer.alloc(data.length);
+      for (let i = 0; i < data.length; i++) {
+        rgbaBuffer[i] = data[(data.length / 4) * (i % 4) + Math.round(i / 4)] || 0;
+      }
+
+      return { width, height, data: rgbaBuffer };
+    }
   }
-  return { width, height, data: rgbaBuffer };
 };
+
+const Jimp = createJimp( {
+  plugins: [jimpResize.methods, jimpContain.methods, jimpCover.methods],
+  formats: [...defaultFormats, jp2Format]
+});
 
 const fileicon = path.join(os.tmpdir(), `fileicon-${Math.random().toFixed(16).substr(2, 6)}.sh`);
 const fileiconBinaryReady = new Promise(resolve => {
@@ -106,7 +122,9 @@ program.command('set <dir> [otherDirs...]').action(async (dir, otherDirs) => {
     const imageSize = 1024;
     const iconPadding = 100;
     const iconSize = imageSize - 2 * iconPadding;
-    const mask = (await jimp.read(path.join(__dirname, 'mask.png'))).resize(imageSize, imageSize);
+
+    const mask = (await Jimp.read(path.join(__dirname, 'mask.png'))).resize({ w: imageSize, h: imageSize});
+
     const region = program.region || 'us';
     let resultIcon;
     let data = null;
@@ -125,7 +143,7 @@ program.command('set <dir> [otherDirs...]').action(async (dir, otherDirs) => {
       console.log(`If this app is incorrect, specify the correct name with -k or --keyword, or generate an icon locally with option -l or --local`);
       const res = await fetch(iconUrl);
       const iconData = await res.buffer();
-      resultIcon = (await jimp.read(iconData)).resize(iconSize, iconSize);
+      resultIcon = (await Jimp.read(iconData)).resize({ w: iconSize, h: iconSize });
     } else {
       if (!program.local) {
         console.log(`Cannot find iOS App with name: ${appName}`);
@@ -152,7 +170,7 @@ program.command('set <dir> [otherDirs...]').action(async (dir, otherDirs) => {
 
       let originalIcon;
       try {
-        originalIcon = await jimp.read(iconBuffer);
+        originalIcon = await Jimp.read(iconBuffer);
       } catch (e) {
         console.error(`Failed to read original icon: ${e.message}`);
         console.error('Re-run with option -i or --input to use a custom image for generation.');
@@ -162,18 +180,18 @@ program.command('set <dir> [otherDirs...]').action(async (dir, otherDirs) => {
       let originalIconScaleSize;
       if (originalIcon.hasAlpha()) {
         originalIconScaleSize = parseFloat(program.scale || '0.9');
-        originalIcon.contain(iconSize * originalIconScaleSize, iconSize * originalIconScaleSize);
+        originalIcon.contain({ w: iconSize * originalIconScaleSize, h: iconSize * originalIconScaleSize });
       } else {
         console.log('The original icon image is opaque; thus it will not be scaled down.')
         originalIconScaleSize = 1;
-        originalIcon.cover(iconSize, iconSize);
+        originalIcon.cover({ w: iconSize, h: iconSize });
       }
-
       const scalePosition = iconSize * (1 - originalIconScaleSize) / 2;
-      resultIcon = (await jimp.create(iconSize, iconSize)).composite(originalIcon, scalePosition, scalePosition);
+      resultIcon = (new Jimp({ width: iconSize, height: iconSize })).composite(originalIcon, scalePosition, scalePosition);
+
     }
 
-    const image = (await jimp.create(imageSize, imageSize, program.color || '#ffffff')).composite(resultIcon, iconPadding, iconPadding);
+    const image = (new Jimp({ width: imageSize, height: imageSize, color: program.color || '#ffffff' })).composite(resultIcon, iconPadding, iconPadding);
 
     // The masking algorithm that is both alpha- and color-friendly and full of magic
     image.scan(0, 0, imageSize, imageSize, (x, y) => {
@@ -182,11 +200,11 @@ program.command('set <dir> [otherDirs...]').action(async (dir, otherDirs) => {
 
     if (program.output) {
       program.output = String(program.output).replace(/(\..*)?$/, '.png');
-      await image.writeAsync(program.output);
+      await image.write(program.output);
       console.log(`Successfully saved icon for ${appDir} at ${program.output}\n`);
     } else {
       const tmpFile = path.resolve(os.tmpdir(), `tmp-${Math.random().toFixed(16).substr(2, 6)}.png`);
-      await image.writeAsync(tmpFile);
+      await image.write(tmpFile);
 
       await fileiconBinaryReady;
       const { status } = cp.spawnSync(fileicon, ['set', appDir, tmpFile], { stdio: 'inherit' });
